@@ -5,8 +5,9 @@ import pandas as pd
 import numpy as np
 
 from string import punctuation
+from scipy.sparse import hstack
 from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
+from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import WordNetLemmatizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -27,6 +28,18 @@ class ToxicCommentClassification:
         self.test = pd.read_csv('inputs/test.csv')
         self.submission = pd.read_csv('inputs/sample_submission.csv')
 
+    def feature_engineering(self, X):
+
+        X['count_sent'] = X['comment_text'].apply(lambda x: len(sent_tokenize(x)))
+        X['count_word'] = X['comment_text'].apply(lambda x: len(x.split()))
+        X['count_unique_word'] = X['comment_text'].apply(lambda x: len(set(x.split())))
+        X['count_letters'] = X['comment_text'].apply(lambda x: len(x))
+        X['count_punctuations'] = X['comment_text'].apply(lambda x: len([c for c in x if c in punctuation]))
+        X['count_words_upper'] = X['comment_text'].apply(lambda x: len([w for w in x.split() if w.isupper()]))
+        X['count_words_title'] = X['comment_text'].apply(lambda x: len([w for w in x.split() if w.istitle()]))
+        X['count_stopwords'] = X['comment_text'].apply(lambda x: len([w for w in x.lower().split() if w in self.stop_words]))
+        X['mean_word_len'] = X['comment_text'].apply(lambda x: np.mean([len(w) for w in x.split()]))
+
     def tokenizer(self, sentences):
         lemmatizer = WordNetLemmatizer()
         tokens = sentences.lower().split()
@@ -46,17 +59,20 @@ class ToxicCommentClassification:
         def _log_count_ratio(X, y):
 
             epsilon = 1.0
-            p = np.log((epsilon + X[y == 1].sum(axis=0)) / (epsilon + (y == 1).sum(axis=0)))
-            q = np.log((epsilon + X[y == 0].sum(axis=0)) / (epsilon + (y == 0).sum(axis=0)))
+            p = np.log((epsilon + X[y == 1].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 1].sum(axis=0), 1))
+            q = np.log((epsilon + X[y == 0].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 0].sum(axis=0), 1))
             r = p - q
 
             return r
 
+        self.feature_engineering(self.train)
+        self.feature_engineering(self.test)
+
         vectorizer = TfidfVectorizer(ngram_range=(1, 2), tokenizer=self.tokenizer)
         vectorizer.fit(self.train['comment_text'])
 
-        X_train = vectorizer.transform(self.train['comment_text'])
-        X_test = vectorizer.transform(self.test['comment_text'])
+        X_train = hstack([vectorizer.transform(self.train['comment_text']), np.nan_to_num(self.train[self.new_features], copy=False)]).tocsr()
+        X_test = hstack([vectorizer.transform(self.test['comment_text']), np.nan_to_num(self.test[self.new_features], copy=False)]).tocsr()
 
         preds = np.zeros((len(self.test), len(self.classes_)))
 
@@ -70,7 +86,7 @@ class ToxicCommentClassification:
 
         submission_id = pd.DataFrame({'id': self.submission['id']})
         submission = pd.concat([submission_id, pd.DataFrame(preds, columns=self.classes_)], axis=1)
-        submission.to_csv('./outputs/3.csv', index=False)
+        submission.to_csv('./outputs/4.csv', index=False)
 
 
 if __name__ == '__main__':
