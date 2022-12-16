@@ -7,6 +7,7 @@ import numpy as np
 from string import punctuation
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.feature_extraction.text import TfidfVectorizer
 
@@ -18,6 +19,7 @@ class ToxicCommentClassification:
         self.classes_ = ['toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
         self.new_features = ['count_sent', 'count_word', 'count_unique_word', 'count_letters', 'count_punctuations', 'count_words_upper', 'count_words_title', 'count_stopwords', 'mean_word_len']
         self.stop_words = set(stopwords.words('english'))
+        self.contraction_dict = json.load(open('inputs/contraction_dict.json', 'r'))
 
     def export_data(self):
 
@@ -26,11 +28,16 @@ class ToxicCommentClassification:
         self.submission = pd.read_csv('inputs/sample_submission.csv')
 
     def tokenizer(self, sentences):
-
+        lemmatizer = WordNetLemmatizer()
+        tokens = sentences.lower().split()
+        sentences = ' '.join([self.contraction_dict[token] if token in self.contraction_dict else token for token in tokens])
         sentences = re.sub(f'[{punctuation}“”¨«»®´·º½¾¿¡§£₤‘’]', ' ', sentences)
+        sentences = re.sub('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ' ', sentences)
+        sentences = re.sub('\[\[.*\]', ' ', sentences)
         sentences = re.sub(r'[0-9+]', ' ', sentences)
         tokens = word_tokenize(sentences.lower())
         tokens = [token for token in tokens if token not in self.stop_words]
+        tokens = [lemmatizer.lemmatize(token) for token in tokens]
 
         return tokens
 
@@ -63,7 +70,7 @@ class ToxicCommentClassification:
 
         submission_id = pd.DataFrame({'id': self.submission['id']})
         submission = pd.concat([submission_id, pd.DataFrame(preds, columns=self.classes_)], axis=1)
-        submission.to_csv('./outputs/2.csv', index=False)
+        submission.to_csv('./outputs/3.csv', index=False)
 
 
 if __name__ == '__main__':
