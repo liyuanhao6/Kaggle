@@ -39,8 +39,8 @@ class ToxicCommentClassification:
         def _log_count_ratio(X, y):
 
             epsilon = 1.0
-            p = np.log((epsilon + X[y == 1].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 1].sum(axis=0), 1))
-            q = np.log((epsilon + X[y == 0].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 0].sum(axis=0), 1))
+            p = np.log((epsilon + X[y == 1].sum(axis=0)) / (epsilon + (y == 1).sum(axis=0)))
+            q = np.log((epsilon + X[y == 0].sum(axis=0)) / (epsilon + (y == 0).sum(axis=0)))
             r = p - q
 
             return r
@@ -63,7 +63,7 @@ class ToxicCommentClassification:
 
         submission_id = pd.DataFrame({'id': self.submission['id']})
         submission = pd.concat([submission_id, pd.DataFrame(preds, columns=self.classes_)], axis=1)
-        submission.to_csv('./outputs/1.csv', index=False)
+        submission.to_csv('./outputs/2.csv', index=False)
 
 
 if __name__ == '__main__':
