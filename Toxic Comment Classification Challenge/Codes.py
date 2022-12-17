@@ -1,5 +1,6 @@
 import re
 import json
+import warnings
 
 import pandas as pd
 import numpy as np
@@ -11,6 +12,8 @@ from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.stem import WordNetLemmatizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.feature_extraction.text import TfidfVectorizer
+
+warnings.filterwarnings("ignore")
 
 
 class ToxicCommentClassification:
@@ -42,17 +45,26 @@ class ToxicCommentClassification:
 
     def tokenizer(self, sentences):
         lemmatizer = WordNetLemmatizer()
+
         tokens = sentences.lower().split()
         sentences = ' '.join([self.contraction_dict[token] if token in self.contraction_dict else token for token in tokens])
-        sentences = re.sub(f'[{punctuation}“”¨«»®´·º½¾¿¡§£₤‘’]', ' ', sentences)
         sentences = re.sub('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ' ', sentences)
+        sentences = re.sub('https?://\S+|www\.\S+', ' ', sentences)
+        sentences = re.sub('[^\x00-\x7f]', ' ', sentences)
         sentences = re.sub('\[\[.*\]', ' ', sentences)
         sentences = re.sub(r'[0-9+]', ' ', sentences)
+        sentences = re.sub(r'[\U0001F600-\U0001F64F]', ' ', sentences)
+        sentences = re.sub(r'[\U0001F300-\U0001F5FF]', ' ', sentences)
+        sentences = re.sub(r'[\U0001F680-\U0001F6FF]', ' ', sentences)
+        sentences = re.sub(r'[\U0001F1E0-\U0001F1FF]', ' ', sentences)
+        sentences = re.sub(r'[\U00002702-\U000027B0]', ' ', sentences)
+        sentences = re.sub(r'[\U000024C2-\U0001F251]', ' ', sentences)
+        sentences = re.sub(f'[{punctuation}]', ' ', sentences)
         tokens = word_tokenize(sentences.lower())
         tokens = [token for token in tokens if token not in self.stop_words]
         tokens = [lemmatizer.lemmatize(token) for token in tokens]
 
-        return tokens
+        return ' '.join(tokens)
 
     def nbsvm_model(self):
 
@@ -68,11 +80,34 @@ class ToxicCommentClassification:
         self.feature_engineering(self.train)
         self.feature_engineering(self.test)
 
-        vectorizer = TfidfVectorizer(ngram_range=(1, 2), tokenizer=self.tokenizer)
-        vectorizer.fit(self.train['comment_text'])
+        train_corpus = self.train['comment_text'].apply(lambda x: self.tokenizer(x))
+        test_corpus = self.test['comment_text'].apply(lambda x: self.tokenizer(x))
 
-        X_train = hstack([vectorizer.transform(self.train['comment_text']), np.nan_to_num(self.train[self.new_features], copy=False)]).tocsr()
-        X_test = hstack([vectorizer.transform(self.test['comment_text']), np.nan_to_num(self.test[self.new_features], copy=False)]).tocsr()
+        vectorizer_unigrams = TfidfVectorizer(ngram_range=(1, 1), analyzer='word', min_df=1, strip_accents='unicode', stop_words='english')
+        vectorizer_unigrams.fit(train_corpus)
+        X_train_unigrams = vectorizer_unigrams.transform(train_corpus)
+        X_test_unigrams = vectorizer_unigrams.transform(test_corpus)
+
+        vectorizer_bigrams = TfidfVectorizer(ngram_range=(2, 2), analyzer='word', min_df=10, strip_accents='unicode', stop_words='english')
+        vectorizer_bigrams.fit(train_corpus)
+        X_train_bigrams = vectorizer_bigrams.transform(train_corpus)
+        X_test_bigrams = vectorizer_bigrams.transform(test_corpus)
+
+        vectorizer_trigrams = TfidfVectorizer(ngram_range=(3, 3), analyzer='word', min_df=10, strip_accents='unicode', stop_words='english')
+        vectorizer_trigrams.fit(train_corpus)
+        X_train_trigrams = vectorizer_trigrams.transform(train_corpus)
+        X_test_trigrams = vectorizer_trigrams.transform(test_corpus)
+
+        vectorizer_chargrams = TfidfVectorizer(ngram_range=(2, 5), analyzer='char', min_df=100, strip_accents='unicode', stop_words='english')
+        vectorizer_chargrams.fit(train_corpus)
+        X_train_chargrams = vectorizer_chargrams.transform(train_corpus)
+        X_test_chargrams = vectorizer_chargrams.transform(test_corpus)
+
+        X_train_indirect_features = np.nan_to_num(self.train[self.new_features], copy=False)
+        X_test_indirect_features = np.nan_to_num(self.test[self.new_features], copy=False)
+
+        X_train = hstack((X_train_unigrams, X_train_bigrams, X_train_trigrams, X_train_chargrams, X_train_indirect_features)).tocsr()
+        X_test = hstack((X_test_unigrams, X_test_bigrams, X_test_trigrams, X_test_chargrams, X_test_indirect_features)).tocsr()
 
         preds = np.zeros((len(self.test), len(self.classes_)))
 
@@ -80,13 +115,13 @@ class ToxicCommentClassification:
             print(f'----------{label}----------')
             r = _log_count_ratio(X_train, self.train[label])
             X = X_train.multiply(r)
-            model = LogisticRegression(dual=False, max_iter=1000, random_state=42)
+            model = LogisticRegression(dual=False, max_iter=2000, random_state=42)
             model.fit(X, self.train[label])
             preds[:, i] = model.predict_proba(X_test.multiply(r))[:, 1]
 
         submission_id = pd.DataFrame({'id': self.submission['id']})
         submission = pd.concat([submission_id, pd.DataFrame(preds, columns=self.classes_)], axis=1)
-        submission.to_csv('./outputs/4.csv', index=False)
+        submission.to_csv('./outputs/5.csv', index=False)
 
 
 if __name__ == '__main__':
