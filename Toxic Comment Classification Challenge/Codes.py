@@ -1,3 +1,4 @@
+import os
 import re
 import json
 import warnings
@@ -25,11 +26,31 @@ class ToxicCommentClassification:
         self.stop_words = set(stopwords.words('english'))
         self.contraction_dict = json.load(open('inputs/contraction_dict.json', 'r'))
 
-    def export_data(self):
+    def export_basic_data(self):
 
         self.train = pd.read_csv('./inputs/train.csv')
         self.test = pd.read_csv('inputs/test.csv')
         self.submission = pd.read_csv('inputs/sample_submission.csv')
+
+    def export_more_data(self, is_pseudo_label=False):
+
+        self.train = pd.read_csv('./inputs/train.csv')
+        self.test = pd.read_csv('inputs/test.csv')
+        self.submission = pd.read_csv('inputs/sample_submission.csv')
+
+        if is_pseudo_label:
+            test_with_pseudo_label = pd.read_csv('./extended_data/test_with_pseudo_label.csv')
+            index_list = []
+            for row in test_with_pseudo_label[self.classes_].astype(float).iterrows():
+                for col in self.classes_:
+                    if row[1][col] >= 0.01 and row[1][col] <= 0.99:
+                        index_list.append(row[0])
+                        break
+            test_with_pseudo_label = pd.concat([self.test, test_with_pseudo_label[self.classes_]], axis=1)
+            test_with_pseudo_label.drop(index=test_with_pseudo_label.index[index_list], inplace=True)
+            test_with_pseudo_label_data = test_with_pseudo_label[self.classes_].apply(lambda x: x+0.5).astype(int)
+            test_with_pseudo_label = pd.concat([test_with_pseudo_label[['id', 'comment_text']], test_with_pseudo_label_data], axis=1)
+            self.train = pd.concat([self.train, test_with_pseudo_label], axis=0)
 
     def feature_engineering(self, X):
 
@@ -66,16 +87,7 @@ class ToxicCommentClassification:
 
         return ' '.join(tokens)
 
-    def nbsvm_model(self):
-
-        def _log_count_ratio(X, y):
-
-            epsilon = 1.0
-            p = np.log((epsilon + X[y == 1].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 1].sum(axis=0), 1))
-            q = np.log((epsilon + X[y == 0].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 0].sum(axis=0), 1))
-            r = p - q
-
-            return r
+    def data_processing(self):
 
         self.feature_engineering(self.train)
         self.feature_engineering(self.test)
@@ -109,6 +121,21 @@ class ToxicCommentClassification:
         X_train = hstack((X_train_unigrams, X_train_bigrams, X_train_trigrams, X_train_chargrams, X_train_indirect_features)).tocsr()
         X_test = hstack((X_test_unigrams, X_test_bigrams, X_test_trigrams, X_test_chargrams, X_test_indirect_features)).tocsr()
 
+        return X_train, X_test
+
+    def nbsvm_model(self, file_name):
+
+        def _log_count_ratio(X, y):
+
+            epsilon = 1.0
+            p = np.log((epsilon + X[y == 1].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 1].sum(axis=0), 1))
+            q = np.log((epsilon + X[y == 0].sum(axis=0)) / np.linalg.norm(epsilon + X[y == 0].sum(axis=0), 1))
+            r = p - q
+
+            return r
+
+        X_train, X_test = self.data_processing()
+
         preds = np.zeros((len(self.test), len(self.classes_)))
 
         for i, label in enumerate(self.classes_):
@@ -121,11 +148,25 @@ class ToxicCommentClassification:
 
         submission_id = pd.DataFrame({'id': self.submission['id']})
         submission = pd.concat([submission_id, pd.DataFrame(preds, columns=self.classes_)], axis=1)
-        submission.to_csv('./outputs/5.csv', index=False)
+        submission.to_csv(file_name, index=False)
+
+
+def baseline_nbsvm():
+    tcc = ToxicCommentClassification()
+    tcc.export_basic_data()
+    tcc.nbsvm_model('./outputs/6.csv')
+
+
+def nbsvm_with_pseudo_label(loop_num=5):
+    if not os.path.exists('./extended_data'):
+        os.mkdir('./extended_data')
+    tcc = ToxicCommentClassification()
+    tcc.export_basic_data()
+    for i in range(loop_num):
+        tcc.nbsvm_model('./extended_data/test_with_pseudo_label.csv')
+        tcc.export_more_data(is_pseudo_label=True)
+    tcc.nbsvm_model('./outputs/6.csv')
 
 
 if __name__ == '__main__':
-
-    tcc = ToxicCommentClassification()
-    tcc.export_data()
-    tcc.nbsvm_model()
+    nbsvm_with_pseudo_label()
