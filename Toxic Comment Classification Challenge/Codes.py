@@ -32,7 +32,7 @@ class ToxicCommentClassification:
         self.test = pd.read_csv('inputs/test.csv')
         self.submission = pd.read_csv('inputs/sample_submission.csv')
 
-    def export_more_data(self, is_pseudo_label=False):
+    def export_more_data(self, is_pseudo_label=False, is_translate=False):
 
         self.train = pd.read_csv('./inputs/train.csv')
         self.test = pd.read_csv('inputs/test.csv')
@@ -51,6 +51,11 @@ class ToxicCommentClassification:
             test_with_pseudo_label_data = test_with_pseudo_label[self.classes_].apply(lambda x: x+0.5).astype(int)
             test_with_pseudo_label = pd.concat([test_with_pseudo_label[['id', 'comment_text']], test_with_pseudo_label_data], axis=1)
             self.train = pd.concat([self.train, test_with_pseudo_label], axis=0)
+
+        if is_translate:
+            for language in ['es', 'de', 'fr']:
+                train_with_translate = pd.read_csv('./extended_data/train_' + language + '.csv')
+                self.train = pd.concat([self.train, train_with_translate], axis=0)
 
     def feature_engineering(self, X):
 
@@ -154,7 +159,7 @@ class ToxicCommentClassification:
 def baseline_nbsvm():
     tcc = ToxicCommentClassification()
     tcc.export_basic_data()
-    tcc.nbsvm_model('./outputs/6.csv')
+    tcc.nbsvm_model('./outputs/5.csv')
 
 
 def nbsvm_with_pseudo_label(loop_num=5):
@@ -168,5 +173,11 @@ def nbsvm_with_pseudo_label(loop_num=5):
     tcc.nbsvm_model('./outputs/6.csv')
 
 
+def nbsvm_with_data_augment():
+    tcc = ToxicCommentClassification()
+    tcc.export_more_data(is_translate=True)
+    tcc.nbsvm_model('./outputs/7.csv')
+
+
 if __name__ == '__main__':
-    nbsvm_with_pseudo_label()
+    nbsvm_with_data_augment()
