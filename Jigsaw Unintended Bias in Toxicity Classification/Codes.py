@@ -1,9 +1,9 @@
 import os
 import re
 import json
-import time
 import warnings
 import random
+import gc
 
 import pandas as pd
 import numpy as np
@@ -18,7 +18,7 @@ from torch.nn import functional as F
 from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings('ignore')
 
 
 def seed_setting(seed=42):
@@ -115,9 +115,10 @@ class Embedding():
 
 class ToxicityClassification:
 
-    def __init__(self, maxlen=220, num_models=2):
+    def __init__(self, maxlen=300, num_models=5):
         self.maxlen = maxlen
         self.num_models = num_models
+        self.device = torch.device('cuda'if torch.cuda.is_available() else 'cpu')
 
         self.train_data_path = '../input/jigsaw-unintended-bias-in-toxicity-classification/train.csv'
         self.test_data_path = '../input/jigsaw-unintended-bias-in-toxicity-classification/test.csv'
@@ -156,9 +157,9 @@ class ToxicityClassification:
         tokenizer = Tokenizer()
         tokenizer.fit_on_texts(list(X_train))
         X_train = tokenizer.texts_to_sequences(X_train)
-        X_train = pad_sequences(X_train, maxlen=self.maxlen)
+        X_train = pad_sequences(X_train, self.maxlen)
         X_test = tokenizer.texts_to_sequences(X_test)
-        X_test = pad_sequences(X_test, maxlen=self.maxlen)
+        X_test = pad_sequences(X_test, self.maxlen)
 
         glove_embedding = Embedding(embedding_file_path=self.glove_embedding_file_path, word_index=tokenizer.word_index)
         print('n unknown words (glove): ', len(glove_embedding.unknown_words))
@@ -166,19 +167,64 @@ class ToxicityClassification:
         print('n unknown words (fasttext): ', len(fasttext_embedding.unknown_words))
         self.embedding_matrix = np.concatenate([glove_embedding.embedding_matrix, fasttext_embedding.embedding_matrix], axis=-1)
 
-        X_train_torch = torch.tensor(X_train, dtype=torch.long).cuda()
-        X_test_torch = torch.tensor(X_test, dtype=torch.long).cuda()
-        y_train_torch = torch.tensor(np.hstack([y_train[:, np.newaxis], y_aux_train]), dtype=torch.float32).cuda()
+        del glove_embedding, fasttext_embedding
+        gc.collect()
+
+        X_train_torch = torch.tensor(X_train, dtype=torch.long).to(device=self.device)
+        X_test_torch = torch.tensor(X_test, dtype=torch.long).to(device=self.device)
+        y_train_torch = torch.tensor(np.hstack([y_train[:, np.newaxis], y_aux_train]), dtype=torch.float32).to(device=self.device)
+
+        del X_train, X_test, y_train
+        gc.collect()
 
         train_dataset = data.TensorDataset(X_train_torch, y_train_torch)
         test_dataset = data.TensorDataset(X_test_torch)
 
+        del X_train_torch, X_test_torch
+        gc.collect()
+
         max_features = len(tokenizer.word_index) + 1
 
-        return train_dataset, test_dataset, X_train_torch, X_test_torch, y_train_torch, y_aux_train, max_features
+        return train_dataset, test_dataset, y_train_torch, y_aux_train, max_features
+
+    def train_model(self, model, train, loss_fn, optimizer, scheduler, batch_size):
+        train_loss = 0.
+
+        train_loader = data.DataLoader(train, batch_size=batch_size, shuffle=True)
+
+        model.train()
+        for (x_batch, y_batch) in train_loader:
+
+            optimizer.zero_grad()
+
+            y_pred = model(x_batch)
+            loss = loss_fn(y_pred, y_batch)
+
+            loss.backward()
+
+            optimizer.step()
+
+            train_loss += loss.item()
+
+        scheduler.step()
+
+        return train_loss / len(train_loader)
+
+    def test_model(self, model, test, output_dim, batch_size):
+        test_loader = data.DataLoader(test, batch_size=batch_size, shuffle=False)
+
+        model.eval()
+        test_preds = np.zeros((len(test), output_dim))
+
+        for i, x_batch in enumerate(test_loader):
+            y_pred = torch.sigmoid(model(*x_batch).detach().cpu()).numpy()
+
+            test_preds[i * batch_size:(i+1) * batch_size, :] = y_pred
+
+        return test_preds
 
     def LSTM(self):
-        train_dataset, test_dataset, X_train_torch, X_test_torch, y_train_torch, y_aux_train, max_features = self.data_processing()
+        train_dataset, test_dataset, y_train_torch, y_aux_train, max_features = self.data_processing()
 
         all_test_preds = []
 
@@ -186,8 +232,21 @@ class ToxicityClassification:
             seed_setting(model_idx)
 
             model = NeuralNet(embedding_matrix=self.embedding_matrix, max_features=max_features, num_aux_targets=y_aux_train.shape[-1])
-            model.cuda()
-            test_preds = self.train_model(model, train_dataset, test_dataset, output_dim=y_train_torch.shape[-1], loss_fn=nn.BCEWithLogitsLoss(reduction='mean'))
+            model.to(device=self.device)
+
+            lr = 0.001
+            batch_size = 512
+            n_epochs = 3
+            loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
+            param_lrs = [{'params': param, 'lr': lr} for param in model.parameters()]
+            optimizer = torch.optim.Adam(param_lrs, lr=lr)
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 0.6 ** epoch)
+
+            for epoch in range(n_epochs):
+                train_loss = self.train_model(model, train_dataset, loss_fn, optimizer, scheduler, batch_size)
+                print(f'train epoch {epoch+1}/{n_epochs} \t loss={train_loss:.4f}')
+            test_preds = self.test_model(model, test_dataset, y_train_torch.shape[-1], batch_size)
+
             all_test_preds.append(test_preds)
 
         submission = pd.DataFrame.from_dict({
@@ -197,59 +256,8 @@ class ToxicityClassification:
 
         submission.to_csv('submission.csv', index=False)
 
-    def train_model(self, model, train, test, loss_fn, output_dim, lr=0.001, batch_size=512, n_epochs=4, enable_checkpoint_ensemble=True):
-        param_lrs = [{'params': param, 'lr': lr} for param in model.parameters()]
-        optimizer = torch.optim.Adam(param_lrs, lr=lr)
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 0.6 ** epoch)
-
-        train_loader = torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True)
-        test_loader = torch.utils.data.DataLoader(test, batch_size=batch_size, shuffle=False)
-        all_test_preds = []
-        checkpoint_weights = [2 ** epoch for epoch in range(n_epochs)]
-
-        for epoch in range(n_epochs):
-            start_time = time.time()
-
-            scheduler.step()
-
-            model.train()
-            avg_loss = 0.
-            for data in train_loader:
-                x_batch = data[:-1]
-                y_batch = data[-1]
-
-                y_pred = model(*x_batch)
-                loss = loss_fn(y_pred, y_batch)
-
-                optimizer.zero_grad()
-                loss.backward()
-
-                optimizer.step()
-                avg_loss += loss.item() / len(train_loader)
-            model.eval()
-            test_preds = np.zeros((len(test), output_dim))
-
-            for i, x_batch in enumerate(test_loader):
-                y_pred = torch.sigmoid(model(*x_batch).detach().cpu()).numpy()
-
-                test_preds[i * batch_size:(i+1) * batch_size, :] = y_pred
-
-            all_test_preds.append(test_preds)
-
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            print(f'Epoch {epoch+1}/{n_epochs} \t loss={avg_loss:.4f} \t time={elapsed_time:.2f}s')
-
-        if enable_checkpoint_ensemble:
-            test_preds = np.average(all_test_preds, weights=checkpoint_weights, axis=0)
-        else:
-            test_preds = all_test_preds[-1]
-
-        return test_preds
-
 
 if __name__ == '__main__':
-    tc = ToxicityClassification()
+    tc = ToxicityClassification(maxlen=300, num_models=2)
     tc.export_basic_data()
     tc.LSTM()
